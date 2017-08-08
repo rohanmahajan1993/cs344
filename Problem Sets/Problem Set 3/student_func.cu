@@ -93,18 +93,13 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   const size_t numCols,
                                   const size_t numBins)
 {
-    4) Perform an exclusive scan (prefix sum) on the histogram to get
-       the cumulative distribution of luminance values (this should go in the
-       incoming d_cdf pointer which already has been allocated for you)       */
-  int numEntries = numRows * numCols;
-  float difference = calculateDifference(d_logLuminance, numEntries, minlogLum);
-  int *d_bins;
-  void histogram(d_logLuminance, *min_logLum, difference,  numBins, numEntries, d_bins) {
-}
-
-void cleanup() {
-  checkCudaErrors(cudaFree(d_red));
-  checkCudaErrors(cudaFree(d_green));
-  checkCudaErrors(cudaFree(d_blue));
-  checkCudaErrors(cudaFree(d_filter));
+    int numEntries = numRows * numCols;
+    float difference = calculateDifference(d_logLuminance, numEntries, minlogLum);
+    int *d_bins;
+    void histogram(d_logLuminance, *min_logLum, difference,  numBins, numEntries, d_bins);
+    int *h_bins;
+    checkCudaErrors(cudaMemcpy(h_bins, d_bins, sizeof(int) * numBins, cudaMemcpyDeviceToDevice));
+    for (int i = 1; i < numBins; i++) {
+	d_cdf[i] = d_cdf[i-1] + h_bins[i-1];	
+    }
 }
