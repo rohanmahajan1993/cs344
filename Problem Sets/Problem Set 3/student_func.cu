@@ -1,10 +1,15 @@
 #include "reference_calc.cpp"
 #include "utils.h"
 
+static inst const threadLimit = 512;
+
 // Adapted from udacity code snippets
-__global__ void find_optimum(float * d_out, float * d_in, bool isMinimum)
+__global__ void find_optimum(float * d_out, float * d_in, bool isMinimum, int numEntries)
 {
     int myId = threadIdx.x + blockDim.x * blockIdx.x;
+    if (myId >= numEntries) {
+	return;
+    }
     int tid  = threadIdx.x;
 
     // do reduction in global mem
@@ -28,32 +33,57 @@ __global__ void find_optimum(float * d_out, float * d_in, bool isMinimum)
     }
 }
 
-float calculateDifference(const float * const h_input, float min_logLum, float max_logLum, int numEntries) {
-    float *h_minValue;
+float calculateDifference(const float * const d_immutable_input, int numEntries, float * h_minValue) {
     float *h_maxValue;
-    float *d_maxValue;
-    float *d_minValue;
     float *d_input;
+    float *d_intermediate_out;
     float *d_out;
-    int threadLimit = 512;
     int blockWidth = threadLimit;
     int numBlocks = numEntries / threadLimit + (numBlocks % threadLimit != 0); 
-    checkCudaErrors(cudaMalloc(&d_minValue,   sizeof(float)));
-    checkCudaErrors(cudaMalloc(&d_maxValue,   sizeof(float)));
     checkCudaErrors(cudaMalloc(&d_input,   sizeof(float) * numEntries));
-    checkCudaErrors(cudaMalloc(&d_out,   sizeof(float) * numBlocks));
-    checkCudaErrors(cudaMemcpy(d_input, h_input, sizeof(float) * numEntries, cudaMemcpyHostToDevice));
-    find_optimum<<<numBlocks, blockWidth>>>(d_input,  d_minValue, true);
-    checkCudaErrors(cudaMemcpy(d_input, h_input, sizeof(float) * numEntries, cudaMemcpyHostToDevice));
-    find_optimum<<<numBlocks, blockWidth>>(d_input,  d_maxValue, false);
-    checkCudaErrors(cudaMemcpy(d_minValue, h_minValue, sizeof(float), cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(d_maxValue, h_maxValue, sizeof(float), cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaFree(d_maxValue));
-    checkCudaErrors(cudaFree(d_minValue));
+    checkCudaErrors(cudaMalloc(&d_intermediate_out,   sizeof(float) * numBlocks));
+    
+    checkCudaErrors(cudaMemcpy(d_input, d_immutable_input, sizeof(float) * numEntries, cudaMemcpyDeviceToDevice));
+    find_optimum<<<numBlocks, blockWidth>>>(d_intermediate_out, d_input, true, numEntries);
+    find_optimum<<<1, numBlocks>>>(d_out, d_intermediate_out, true, numEntries);
+    checkCudaErrors(cudaMemcpy(h_minValue, d_out, sizeof(float), cudaMemcpyDeviceToHost));
+
+    checkCudaErrors(cudaMemcpy(d_input, d_immutable_input, sizeof(float) * numEntries, cudaMemcpyHostToDevice));
+    find_optimum<<<numBlocks, blockWidth>>>(d_intermediate_out, d_input, false, numEntries);
+    find_optimum<<<1, numBlocks>>>(d_out, d_intermediate_out, false, numEntries);
+    checkCudaErrors(cudaMemcpy(h_maxValue, d_out, sizeof(float), cudaMemcpyDeviceToHost));
+
+    checkCudaErrors(cudaFree(d_input));
+    checkCudaErrors(cudaFree(d_intermediate_out));
+    checkCudaErrors(cudaFree(d_out));
+
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-    float difference = h_maxValue - h_minValue; 
+    float difference = *h_maxValue - *h_minValue; 
     return difference;
 }
+// Adapted from udacity code snippet
+__global__ void simple_histo(int *d_bins, int *d_in, float min, float range, const int numBins, numEntries)
+{
+    int myId = threadIdx.x + blockDim.x * blockIdx.x;
+    if (myId >= numEntries) {
+      return;
+    }
+    float value = d_in[myId];
+    unsigned int bin = min(static_cast<unsigned int>(numBins - 1),
+                           static_cast<unsigned int>((value - min) / range * numBins));
+    atomicAdd(&(d_bins[bin]), 1);
+}
+
+void histogram(const float* const d_immutable_input, float min, float range, int numBins, int numEntries, int * d_bins) {
+    int blockWidth = threadLimit;
+    int numBlocks = numEntries / threadLimit + (numBlocks % threadLimit != 0); 
+    float *d_input;
+    checkCudaErrors(cudaMalloc(&d_input,   sizeof(float) * numEntries));
+    checkCudaErrors(cudaMalloc(&d_bins,   sizeof(int) * numBins));
+    checkCudaErrors(cudaMemcpy(d_input, d_immutable_input, sizeof(float) * numEntries, cudaMemcpyDeviceToDevice));
+    checkCudaErrors(cudaMemset(d_input, 0, sizeof(int) * numBins, cudaMemcpyDeviceToDevice));
+    simple_histo<<<numBlocks, blockWidth>>>(d_bins, d_input, min, range, numBins, numEntries);
+} 
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   unsigned int* const d_cdf,
@@ -63,43 +93,13 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   const size_t numCols,
                                   const size_t numBins)
 {
-  //TODO
-  /*Here are the steps you need to implement
-    1) find the minimum and maximum value in the input logLuminance channel
-       store in min_logLum and max_logLum
-    2) subtract them to find the range
-    3) generate a histogram of all the values in the logLuminance channel using
-       the formula: bin = (lum[i] - lumMin) / lumRange * numBins
     4) Perform an exclusive scan (prefix sum) on the histogram to get
        the cumulative distribution of luminance values (this should go in the
        incoming d_cdf pointer which already has been allocated for you)       */
-    int threadLimit = 512;
-    int blockWidth = trunc(sqrt(threadLimit));
-    int blockHeight = trunc(sqrt(threadLimit));
-    int numBlockRows = numRows / blockWidth + (numRows % blockWidth != 0);
-    int numBlockCols = numCols / blockHeight + (numCols % blockHeight != 0);
-    const dim3 blockSize(blockWidth, blockHeight, 1);
-    const dim3 gridSize(numBlockRows, numBlockCols, 1);
-   
- }
-//This kernel takes in three color channels and recombines them
-//into one image.  The alpha channel is set to 255 to represent
-//that this image has no transparency.
-__global__
-void findOptimum(const float* const d_input, float * optimalValue, boolean isMinimum)
-{
-  int threadLimit = 512
-  int rowIndex = threadIdx.x + blockDim.x * blockIdx.x;
-  int colIndex = threadIdx.y + blockDim.y * blockIdx.y;
-  int index = (rowIndex * numCols) + colIndex;
-  if (rowIndex < numRows && colIndex < numCols) {
-    unsigned char red   = redChannel[index];
-    unsigned char green = greenChannel[index];
-    unsigned char blue  = blueChannel[index];
-    //Alpha should be 255 for no transparency
-    uchar4 outputPixel = make_uchar4(red, green, blue, 255);
-    outputImageRGBA[index] = outputPixel;
-  }
+  int numEntries = numRows * numCols;
+  float difference = calculateDifference(d_logLuminance, numEntries, minlogLum);
+  int *d_bins;
+  void histogram(d_logLuminance, *min_logLum, difference,  numBins, numEntries, d_bins) {
 }
 
 void cleanup() {
