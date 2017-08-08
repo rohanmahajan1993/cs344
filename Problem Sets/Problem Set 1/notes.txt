@@ -1,0 +1,1 @@
+It is supper annoying about we have to malloc all of these device variables.
